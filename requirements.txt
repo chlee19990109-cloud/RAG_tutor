@@ -125,7 +125,7 @@ opentelemetry-semantic-conventions==0.60b1
 orjson==3.11.7
 ormsgpack==1.12.2
 overrides==7.7.0
-packaging==23.2
+packaging
 pandas==2.3.3
 pandas-profiling==3.6.6
 patsy==1.0.2
