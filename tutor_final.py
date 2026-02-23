@@ -54,8 +54,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # 긴 문서를 일정 크기(chunk_size)의 청크(조각)로 분할하는 텍스트 분할기
 # 단락 → 문장 → 단어 순으로 재귀적으로 분할하여 문맥을 최대한 보존
 
-from langchain.chains import RetrievalQA
-# 검색 기반 QA 체인: 사용자 질문 → 벡터 DB 검색 → 검색된 문서를 컨텍스트로 하여 LLM 답변 생성
+from langchain.chains import ConversationalRetrievalChain
+# Fix #5: RetrievalQA(Deprecated) → ConversationalRetrievalChain으로 교체
+# 검색 기반 대화형 QA 체인: 이전 대화 기록(chat_history)을 함께 전달하여
+# "그것의 장점은?" 같은 연속 질문에도 맥락을 유지하며 답변 생성
 
 from langchain.prompts import PromptTemplate
 # LLM에 전달할 프롬프트 템플릿을 구조화하는 클래스
@@ -592,7 +594,8 @@ def extract_text(file, ext: str, path: str, key: str) -> str:
     # --- 이미지 처리 (GPT-4o Vision) ---
     elif ext in [".jpg", ".png", ".jpeg"]:
         # OpenAI SDK를 직접 사용 (LangChain의 Vision 지원이 불안정하므로)
-        client = OpenAI(api_key=key)
+        # Fix #1: 매번 새로 생성하지 않고 캐시된 클라이언트 재사용
+        client = get_cached_openai_client(key)
         # 이미지를 Base64로 인코딩: OpenAI Vision API는 URL 또는 Base64만 허용
         with open(path, "rb") as f:
             enc = base64.b64encode(f.read()).decode('utf-8')
@@ -613,7 +616,8 @@ def extract_text(file, ext: str, path: str, key: str) -> str:
 
     # --- 오디오 처리 (Whisper) ---
     elif ext in [".mp3", ".wav", ".m4a"]:
-        client = OpenAI(api_key=key)
+        # Fix #1: 캐시된 클라이언트 재사용
+        client = get_cached_openai_client(key)
         # Whisper API는 재생 시간을 반환하지 않으므로, 파일 크기로 재생 시간을 추정
         # 추정 공식: (파일 바이트 수) / (128kbps → 초당 바이트 수) / 60 = 분
         # 128kbps = 128 * 1024 bits/s = 128 * 1024 / 8 bytes/s ≈ 16,384 bytes/s
@@ -639,8 +643,8 @@ def extract_text(file, ext: str, path: str, key: str) -> str:
             vid = VideoFileClip(path)  # 영상 파일 로드 (메모리 + 파일 핸들 점유)
             # 오디오 트랙을 MP3로 추출 (logger=None: 진행 로그 출력 억제)
             vid.audio.write_audiofile(audio_path, logger=None)
-            # 추출된 MP3를 Whisper로 전사
-            client = OpenAI(api_key=key)
+            # 추출된 MP3를 Whisper로 전사 (Fix #1: 캐시된 클라이언트 재사용)
+            client = get_cached_openai_client(key)
             with open(audio_path, "rb") as f:
                 txt = client.audio.transcriptions.create(model="whisper-1", file=f).text
             # 영상의 실제 재생 시간(초)을 분으로 변환하여 비용 기록 (추정값보다 정확)
@@ -710,7 +714,9 @@ def build_knowledge_base(lec_files, prob_files, key: str, ui_text: dict):
 
 
 @st.cache_resource(show_spinner=False)
-def _build_knowledge_base_cached(file_hashes: tuple, lec_files, prob_files, key: str, ui_text: dict):
+def _build_knowledge_base_cached(file_hashes: tuple, _lec_files, _prob_files, key: str, ui_text: dict):
+    # Fix #2: 파라미터명에 '_' 접두사 → @st.cache_resource가 UploadedFile 객체를 해싱하지 않음
+    # (무거운 파일 객체를 해싱 시 성능 저하 또는 UnhashableTypeError 경고 방지)
     """
     실제 DB 생성 로직을 수행하는 캐시된 내부 함수입니다.
 
@@ -777,9 +783,9 @@ def _build_knowledge_base_cached(file_hashes: tuple, lec_files, prob_files, key:
             finally:
                 os.remove(tmp_path)  # 성공/실패 여부와 관계없이 임시 파일 삭제
 
-    # 강의 자료와 연습 문제를 각각 다른 source_type으로 처리
-    if lec_files:  process_files(lec_files,  "Lecture Material")
-    if prob_files: process_files(prob_files, "Practice Problem")
+    # 강의 자료와 연습 문제를 각각 다른 source_type으로 처리 (Fix #2: 변수명 반영)
+    if _lec_files:  process_files(_lec_files,  "Lecture Material")
+    if _prob_files: process_files(_prob_files, "Practice Problem")
 
     # 유효한 Document가 하나도 없으면 실패 처리
     if not docs:
@@ -818,13 +824,18 @@ def _build_knowledge_base_cached(file_hashes: tuple, lec_files, prob_files, key:
 
 def get_rag_chain(db, key: str, target_lang: str):
     """
-    AI 도우미 탭에서 사용할 RAG (Retrieval-Augmented Generation) 체인을 생성합니다.
+    AI 도우미 탭에서 사용할 대화형 RAG 체인을 생성합니다.
+
+    Fix #3 & #5: RetrievalQA(Deprecated) → ConversationalRetrievalChain으로 교체
+    - 이전 대화 기록(chat_history)을 입력받아 맥락을 유지한 채 답변 생성
+    - "그것의 장점은?" 같은 지시어를 포함한 연속 질문도 정확히 처리 가능
 
     RAG 체인 동작 흐름:
-    1. 사용자 질문 수신
-    2. FAISS DB에서 관련 청크 검색 (MMR 방식)
-    3. 검색된 청크를 컨텍스트로 삼아 GPT-4o에 답변 생성 요청
-    4. 답변 반환
+    1. 사용자 질문 + 이전 대화 기록(chat_history) 수신
+    2. 대화 맥락을 반영하여 독립적인 검색 쿼리 자동 생성 (condense_question)
+    3. FAISS DB에서 관련 청크 검색 (MMR 방식)
+    4. 검색된 청크를 컨텍스트로 삼아 GPT-4o에 답변 생성 요청
+    5. 답변 반환
 
     검색 방식 (MMR - Maximal Marginal Relevance):
     - 단순 유사도 검색과 달리 다양성을 함께 고려
@@ -842,7 +853,9 @@ def get_rag_chain(db, key: str, target_lang: str):
         target_lang: 답변 언어 ("Korean" 또는 "English")
 
     Returns:
-        LangChain RetrievalQA 체인 객체 (chain.invoke({"query": ...})로 호출)
+        ConversationalRetrievalChain 객체
+        호출 방식: chain({"question": ..., "chat_history": [(human, ai), ...]})
+        결과 추출: response["answer"]
     """
     # 캐시된 LLM 클라이언트 사용 (temperature=0.2: 일관성 있는 답변 선호)
     llm = get_cached_chat_llm(key, temperature=0.2)
@@ -888,18 +901,21 @@ def get_rag_chain(db, key: str, target_lang: str):
         }
     )
 
-    # --- RetrievalQA 체인 조립 ---
-    return RetrievalQA.from_chain_type(
+    # --- Fix #3: ConversationalRetrievalChain 조립 ---
+    # combine_docs_chain_kwargs: 검색된 문서들을 합쳐 LLM에 전달할 때 사용하는 프롬프트 설정
+    # return_source_documents=False: 출처 문서를 별도로 반환하지 않음 (응답 속도 향상)
+    # verbose=False: 내부 체인 실행 로그 출력 억제
+    return ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=retriever,
-        # chain_type_kwargs: 프롬프트 템플릿을 체인에 주입
-        # input_variables는 LangChain이 자동으로 채우는 변수명 목록
-        chain_type_kwargs={
+        combine_docs_chain_kwargs={
             "prompt": PromptTemplate(
                 template=template,
                 input_variables=["context", "question"]
             )
-        }
+        },
+        return_source_documents=False,
+        verbose=False,
     )
 
 
@@ -1406,7 +1422,7 @@ def gen_flashcards(db, api_key: str, topic: str, ui_text: dict) -> list:
     # 캐시된 OpenAI 클라이언트 사용 (LangChain 없이 직접 호출 → JSON 형식 제어 용이)
     client = get_cached_openai_client(api_key)
 
-    # 프롬프트: JSON 배열만 출력하도록 엄격히 지시
+    # 프롬프트: "flashcards" 키를 가진 JSON 객체로 출력하도록 지시
     prompt = f"""
     Role: Exam Prep Tutor.
     Task: Create a comprehensive list of Q&A flashcards based on the [Context].
@@ -1415,21 +1431,22 @@ def gen_flashcards(db, api_key: str, topic: str, ui_text: dict) -> list:
     {scope_instruction}
 
     Language: {lang}.
-    Format: JSON Array ONLY. Keys: "front" (Question), "back" (Short Answer).
+    Format: Return a JSON object with a 'flashcards' array. Each item has "front" (Question) and "back" (Short Answer) keys.
     
     [Context]:
     {context_trimmed}
     
-    Output example: [{{"front": "What is X?", "back": "X is Y."}}, {{"front": "...", "back": "..."}}]
+    Output example: {{"flashcards": [{{"front": "What is X?", "back": "X is Y."}}, {{"front": "...", "back": "..."}}]}}
     """
 
     try:
-        # system: "You are a JSON generator" → JSON만 출력하도록 역할 부여
-        # temperature=0.5: 약간의 다양성으로 질문이 단조롭지 않게
+        # Fix #4: response_format="json_object" 추가 → JSON 파싱 오류를 원천 차단
+        # 시스템 프롬프트에 "flashcards" 키를 반드시 포함하도록 명시 (json_object 요건)
         response = client.chat.completions.create(
             model="gpt-4o",
+            response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a JSON generator."},
+                {"role": "system", "content": "You are a JSON generator. Always respond with a JSON object containing a 'flashcards' array. Each item has 'front' and 'back' keys."},
                 {"role": "user",   "content": prompt}
             ],
             temperature=0.5
@@ -1439,8 +1456,9 @@ def gen_flashcards(db, api_key: str, topic: str, ui_text: dict) -> list:
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens)
         res = response.choices[0].message.content
-        # clean_json()으로 마크다운 코드블록 등 제거 후 JSON 파싱
-        return json.loads(clean_json(res))
+        # Fix #4: json_object 모드에서는 항상 유효한 JSON이 보장되므로 clean_json() 불필요
+        # {"flashcards": [...]} 형태로 반환되므로 "flashcards" 키로 배열 추출
+        return json.loads(res)["flashcards"]
     except Exception as e:
         # 파싱 실패 시 에러 카드 1개를 반환하여 UI에서 에러 상황을 표시
         return [{"front": "Error", "back": f"Failed to generate: {str(e)}"}]
@@ -1515,7 +1533,7 @@ def gen_quiz(db, api_key: str, topic: str, ui_text: dict) -> list:
     {scope_instruction}
 
     Language: {lang}.
-    Format: JSON Array ONLY.
+    Format: Return a JSON object with a 'quiz' array.
     
     Requirements:
     - 4 Options per question.
@@ -1527,14 +1545,17 @@ def gen_quiz(db, api_key: str, topic: str, ui_text: dict) -> list:
     {context_trimmed}
     
     Output example: 
-    [{{"question":"What is 1+1?", "options":["3","2","5","4"], "answer":"2", "explanation":"1+1 equals 2."}}]
+    {{"quiz": [{{"question":"What is 1+1?", "options":["3","2","5","4"], "answer":"2", "explanation":"1+1 equals 2."}}]}}
     """
 
     try:
+        # Fix #4: response_format="json_object" 추가 → JSON 파싱 오류를 원천 차단
+        # 시스템 프롬프트에 "quiz" 키를 반드시 포함하도록 명시 (json_object 요건)
         response = client.chat.completions.create(
             model="gpt-4o",
+            response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a JSON generator."},
+                {"role": "system", "content": "You are a JSON generator. Always respond with a JSON object containing a 'quiz' array. Each quiz item has 'question', 'options' (list of 4), 'answer', and 'explanation' keys."},
                 {"role": "user",   "content": prompt}
             ],
             temperature=0.5  # 문제 다양성을 위해 약간의 창의성 허용
@@ -1543,7 +1564,9 @@ def gen_quiz(db, api_key: str, topic: str, ui_text: dict) -> list:
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens)
         res = response.choices[0].message.content
-        return json.loads(clean_json(res))  # 순수 JSON 파싱
+        # Fix #4: json_object 모드에서는 항상 유효한 JSON이 보장되므로 clean_json() 불필요
+        # {"quiz": [...]} 형태로 반환되므로 "quiz" 키로 배열 추출
+        return json.loads(res)["quiz"]
     except Exception as e:
         # 에러 퀴즈 반환: UI에서 "question" 키 존재 여부로 성공/실패 판별하므로 키 구조 유지
         return [{"question": "Error", "options": ["Error"], "answer": "Error", "explanation": str(e)}]
@@ -1846,14 +1869,22 @@ if st.session_state.chain and st.session_state.db:
                             "Include its definition, context, related terms, and why it is important in this document."
                         )
 
-                    # RAG 체인 실행: 위에서 구성한 확장된 search_query를 {question} 자리에 삽입
-                    # → FAISS 검색 + GPT-4o 답변 생성이 한 번에 처리됨
+                    # Fix #3: ConversationalRetrievalChain에 맞는 호출 방식
+                    # 이전 대화 내역을 (human 메시지, ai 메시지) 튜플 리스트로 변환
+                    # 현재 user 메시지는 이미 messages에 추가되었으므로 마지막 1개(= 현재 질문)는 제외
+                    prior_msgs = st.session_state.messages[:-1]  # 현재 질문 제외
+                    chat_history = [
+                        (prior_msgs[j]["content"], prior_msgs[j+1]["content"])
+                        for j in range(0, len(prior_msgs) - 1, 2)
+                        if prior_msgs[j]["role"] == "user" and prior_msgs[j+1]["role"] == "assistant"
+                    ]
+
                     with get_openai_callback() as cb:
-                        response = st.session_state.chain.invoke({"query": search_query})
+                        response = st.session_state.chain({"question": search_query, "chat_history": chat_history})
                     record_cost("AI 도우미 답변", "gpt-4o",
                                 input_tokens=cb.prompt_tokens,
                                 output_tokens=cb.completion_tokens)
-                    res = response['result']  # RetrievalQA 결과에서 답변 텍스트 추출
+                    res = response['answer']  # Fix #3: ConversationalRetrievalChain 결과 키 'answer'
 
                 except Exception as e:
                     res = f"Error: {str(e)}"
