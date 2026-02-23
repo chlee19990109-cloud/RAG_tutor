@@ -2,11 +2,11 @@
 streamlit>=1.35.0
 
 # LangChain 생태계 (버전 호환성을 위해 함께 맞춰야 함)
-langchain>=0.3.0
-langchain-openai>=0.2.0
-langchain-community>=0.3.0
-langchain-core>=0.3.0
-langchain-text-splitters>=0.3.0
+langchain==0.3.0
+langchain-openai==0.2.0
+langchain-community==0.3.0
+langchain-core==0.3.0
+langchain-text-splitters==0.3.0
 langsmith>=0.1.77
 
 # OpenAI SDK (직접 호출용: Whisper, TTS, Vision)
