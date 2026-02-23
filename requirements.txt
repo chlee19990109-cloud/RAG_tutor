@@ -1,15 +1,30 @@
-streamlit
-langchain==0.1.16
-langchain-openai==0.1.3
-langchain-community==0.0.34
-langchain-core==0.1.45
-langchain-text-splitters==0.0.1
-langsmith==0.1.49
+# 웹 앱 프레임워크
+streamlit>=1.35.0
+
+# LangChain 생태계 (버전 호환성을 위해 함께 맞춰야 함)
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+langchain-core>=0.3.0
+langchain-text-splitters>=0.3.0
+langsmith>=0.1.77
+
+# OpenAI SDK (직접 호출용: Whisper, TTS, Vision)
+openai>=1.30.0
+
+# 문서 처리
 python-pptx
-openai
-graphviz
-moviepy
-faiss-cpu
 pypdf
 docx2txt
+
+# 벡터 DB
+faiss-cpu
+
+# 시각화
+graphviz
+
+# 영상 처리 (선택적 기능)
+moviepy
+
+# 토큰 계산 (LangChain 내부 의존성)
 tiktoken
